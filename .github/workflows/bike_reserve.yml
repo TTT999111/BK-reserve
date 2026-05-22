@@ -1,0 +1,56 @@
+name: docomo bike auto reserve
+
+on:
+  schedule:
+    # JST 07:00-09:00 (UTC 22:00-00:00 of previous day) 平日のみ
+    # UTC 22:00-23:59 (前日のSun-Thu = JSTのMon-Fri 07:00-08:59)
+    - cron: '*/1 22,23 * * 0-4'
+  workflow_dispatch:  # 手動起動可能
+
+concurrency:
+  group: bike-reserve
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Build config.json from secrets
+        env:
+          SESSION_ID: ${{ secrets.SESSION_ID }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          cat > config.json <<EOF
+          {
+              "session_id": "${SESSION_ID}",
+              "api_key": "${API_KEY}",
+              "parks": [
+                  {"park_id": "00010147", "park_name": "H1-29.skyz tower&garden"},
+                  {"park_id": "00010406", "park_name": "H1-68.芝浦工業大学附属中学高等学校"},
+                  {"park_id": "00010223", "park_name": "H1-44.テプコ豊洲ビル"}
+              ],
+              "reserve_interval_minutes": 18,
+              "start_hour": 7,
+              "start_minute": 0,
+              "end_hour": 9,
+              "end_minute": 0,
+              "prefer_battery_level_min": 2,
+              "prefer_csa_type": 1
+          }
+          EOF
+
+      - name: Run tick
+        env:
+          TZ: Asia/Tokyo
+        run: python3 docomo_bike_tick.py
