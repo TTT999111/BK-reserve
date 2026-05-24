@@ -13,6 +13,8 @@ jobs:
   tick:
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      actions: write  # 古いキャッシュ削除のため
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +25,22 @@ jobs:
 
       - name: Install dependencies
         run: pip install requests
+
+      - name: Compute date for cache key
+        id: cachekey
+        env:
+          TZ: Asia/Tokyo
+        run: echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Restore state cache
+        id: restore-state
+        uses: actions/cache/restore@v4
+        with:
+          path: logs
+          # 当日 prefix で前のtickが保存した最新のキャッシュを取り出す
+          key: bike-state-${{ steps.cachekey.outputs.date }}-${{ github.run_id }}
+          restore-keys: |
+            bike-state-${{ steps.cachekey.outputs.date }}-
 
       - name: Build config.json from secrets
         env:
@@ -52,3 +70,10 @@ jobs:
         env:
           TZ: Asia/Tokyo
         run: python3 docomo_bike_tick.py
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs
+          key: bike-state-${{ steps.cachekey.outputs.date }}-${{ github.run_id }}

@@ -25,6 +25,7 @@ import requests
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
+STATE_PATH = os.path.join(SCRIPT_DIR, "logs", "state.json")
 
 BASE_URL = "https://csapi.docomo-cycle.jp/v12/api/restful"
 
@@ -49,6 +50,30 @@ log = logging.getLogger(__name__)
 def load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def save_state(cyc_name: str, reserve_limit: str):
+    try:
+        with open(STATE_PATH, "w") as f:
+            json.dump({"cyc_name": cyc_name, "reserve_limit": reserve_limit}, f)
+    except Exception as e:
+        log.warning("state保存失敗: %s", e)
+
+
+def load_state() -> dict:
+    try:
+        with open(STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def clear_state():
+    try:
+        if os.path.exists(STATE_PATH):
+            os.remove(STATE_PATH)
+    except Exception as e:
+        log.warning("state削除失敗: %s", e)
 
 
 class DocomoBikeClient:
@@ -90,6 +115,7 @@ class DocomoBikeClient:
             log.error("予約失敗 (%s): %s", cyc_name, data)
             return None
         log.info("予約成功: %s (期限: %s)", cyc_name, data.get("reserve_limit"))
+        save_state(cyc_name, data.get("reserve_limit", ""))
         return data
 
     def cancel_reservation(self):
@@ -174,36 +200,51 @@ def main():
     user_status = user_info.get("user_status", -1)
 
     if user_status == 1:
-        # 予約中
+        # 予約中。status APIは reserve_limit を返さないため state ファイルから取得する。
         cyc_name = user_info.get("cyc_name", "")
-        limit_str = user_info.get("reserve_limit", "")
+        state = load_state()
+        limit_str = state.get("reserve_limit", "")
+        # cyc_name の整合性チェック（state が古い別予約の可能性）
+        if state.get("cyc_name") and cyc_name and state.get("cyc_name") != cyc_name:
+            log.warning("state不一致 (state=%s, api=%s): stateクリア", state.get("cyc_name"), cyc_name)
+            limit_str = ""
         limit_dt = parse_reserve_limit(limit_str)
 
         if limit_dt is None:
-            log.warning("reserve_limit パース失敗: %s", limit_str)
-            return
+            # state が無い/古い → 残り時間不明。終了時刻近くなければ安全側でキャンセル＆即再予約。
+            log.warning("state不明のためキャンセル＆再予約を試行 (cyc=%s)", cyc_name)
+            if now >= final_hold_dt:
+                log.info("終了時刻が近いため予約を維持します")
+                return
+            cancel_result = client.cancel_reservation()
+            if cancel_result is False:
+                return
+            clear_state()
+            # 新規予約フェーズへ
+        else:
+            remaining = (limit_dt - now).total_seconds()
+            log.info("予約中: %s (期限: %s, 残り %d秒)", cyc_name, limit_str, remaining)
 
-        remaining = (limit_dt - now).total_seconds()
-        log.info("予約中: %s (期限: %s, 残り %d秒)", cyc_name, limit_str, remaining)
+            # 終了時刻が近い場合は予約を残してそのまま
+            if now >= final_hold_dt:
+                log.info("終了時刻が近いため予約を維持します")
+                return
 
-        # 終了時刻が近い場合は予約を残してそのまま
-        if now >= final_hold_dt:
-            log.info("終了時刻が近いため予約を維持します")
-            return
+            # まだ残り時間がある場合は何もしない
+            if remaining > REFRESH_THRESHOLD_SEC:
+                return
 
-        # まだ残り時間がある場合は何もしない
-        if remaining > REFRESH_THRESHOLD_SEC:
-            return
-
-        # 残り時間が少ない → キャンセルして再予約
-        log.info("残り%d秒のためキャンセル＆再予約", remaining)
-        cancel_result = client.cancel_reservation()
-        if cancel_result is False:
-            return  # 通常のキャンセル失敗。次のtickで再試行
-        # 成功 or expired どちらの場合も新規予約へ進む
+            # 残り時間が少ない → キャンセルして再予約
+            log.info("残り%d秒のためキャンセル＆再予約", remaining)
+            cancel_result = client.cancel_reservation()
+            if cancel_result is False:
+                return  # 通常のキャンセル失敗。次のtickで再試行
+            clear_state()
+            # 成功 or expired どちらの場合も新規予約へ進む
 
     else:
-        # 予約なし
+        # 予約なし。残っている state は無効。
+        clear_state()
         log.info("予約なし。新規予約を試みます")
 
         # 終了時刻が近い場合は新規予約しない
