@@ -1,11 +1,9 @@
 name: docomo bike auto reserve
 
 on:
-  schedule:
-    # JST 07:00-09:00 (UTC 22:00-00:00 of previous day) 平日のみ
-    # UTC 22:00-23:59 (前日のSun-Thu = JSTのMon-Fri 07:00-08:59)
-    - cron: '*/1 22,23 * * 0-4'
-  workflow_dispatch:  # 手動起動可能
+  # 外部cron (cron-job.org) から workflow_dispatch API で起動。
+  # GitHub Actions schedule は遅延・スキップが多いため使わない。
+  workflow_dispatch:
 
 concurrency:
   group: bike-reserve
