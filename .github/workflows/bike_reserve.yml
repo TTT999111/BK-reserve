@@ -57,10 +57,10 @@ jobs:
                   {"park_id": "00010223", "park_name": "H1-44.テプコ豊洲ビル"}
               ],
               "reserve_interval_minutes": 18,
-              "start_hour": 0,
+              "start_hour": 7,
               "start_minute": 0,
-              "end_hour": 23,
-              "end_minute": 59,
+              "end_hour": 9,
+              "end_minute": 0,
               "prefer_battery_level_min": 2,
               "prefer_csa_type": 1
           }
