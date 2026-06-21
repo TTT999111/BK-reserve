@@ -6,11 +6,12 @@ launchd から毎分起動されることを前提に、1回の実行は数秒�
 状態はAPI側にあるためファイル保存不要。App Nap / スリープの影響を受けない。
 
 動作:
-- 平日 7:00 〜 9:00 の間のみ動作（時間外なら即終了）
+- 平日 朝7:00〜9:00 / 夜19:00〜21:00 の間のみ動作（時間外なら即終了）
+- 時間帯ごとに対象ポートが異なる（朝=skyz他, 夜=豊洲駅/シビックセンター）
 - 現在の予約状況をAPIで確認
 - 予約なし → 予約する
 - 予約あり → 残り時間が3分以下ならキャンセル → 即再予約
-- 8:55 以降は予約を残して終了
+- 終了5分前以降は予約を残して終了
 """
 
 import json
@@ -25,9 +26,32 @@ import requests
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
-STATE_PATH = os.path.join(SCRIPT_DIR, "logs", "state.json")
 
 BASE_URL = "https://csapi.docomo-cycle.jp/v12/api/restful"
+
+# 時間帯ごとの動作定義（平日のみ）。parksは優先順（先頭ほど優先）。
+# 朝と夜で予約を取り違えないよう state ファイルも時間帯別に分ける。
+WINDOWS = [
+    {
+        "name": "morning",
+        "start": (7, 0),
+        "end": (9, 0),
+        "parks": [
+            {"park_id": "00010147", "park_name": "H1-29.skyz tower&garden"},
+            {"park_id": "00010406", "park_name": "H1-68.芝浦工業大学附属中学高等学校"},
+            {"park_id": "00010223", "park_name": "H1-44.テプコ豊洲ビル"},
+        ],
+    },
+    {
+        "name": "evening",
+        "start": (19, 0),
+        "end": (21, 0),
+        "parks": [
+            {"park_id": "00010093", "park_name": "H1-02.豊洲駅"},
+            {"park_id": "00010278", "park_name": "H1-53.豊洲シビックセンター"},
+        ],
+    },
+]
 
 # 残り時間がこの秒数以下になったらキャンセル→再予約
 REFRESH_THRESHOLD_SEC = 180  # 3分
@@ -52,26 +76,31 @@ def load_config():
         return json.load(f)
 
 
-def save_state(cyc_name: str, reserve_limit: str):
+def state_path(window_name: str) -> str:
+    return os.path.join(LOG_DIR, f"state_{window_name}.json")
+
+
+def save_state(window_name: str, cyc_name: str, reserve_limit: str):
     try:
-        with open(STATE_PATH, "w") as f:
+        with open(state_path(window_name), "w") as f:
             json.dump({"cyc_name": cyc_name, "reserve_limit": reserve_limit}, f)
     except Exception as e:
         log.warning("state保存失敗: %s", e)
 
 
-def load_state() -> dict:
+def load_state(window_name: str) -> dict:
     try:
-        with open(STATE_PATH) as f:
+        with open(state_path(window_name)) as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def clear_state():
+def clear_state(window_name: str):
     try:
-        if os.path.exists(STATE_PATH):
-            os.remove(STATE_PATH)
+        p = state_path(window_name)
+        if os.path.exists(p):
+            os.remove(p)
     except Exception as e:
         log.warning("state削除失敗: %s", e)
 
@@ -109,13 +138,13 @@ class DocomoBikeClient:
             return []
         return data.get("cycle_info", [])
 
-    def reserve_bike(self, cyc_name: str) -> Optional[dict]:
+    def reserve_bike(self, cyc_name: str, window_name: str) -> Optional[dict]:
         data = self._request("POST", "reservecycle", json={"cyc_name": cyc_name})
         if data.get("result") != 200:
             log.error("予約失敗 (%s): %s", cyc_name, data)
             return None
         log.info("予約成功: %s (期限: %s)", cyc_name, data.get("reserve_limit"))
-        save_state(cyc_name, data.get("reserve_limit", ""))
+        save_state(window_name, cyc_name, data.get("reserve_limit", ""))
         return data
 
     def cancel_reservation(self):
@@ -162,6 +191,16 @@ def parse_reserve_limit(s: str) -> Optional[datetime]:
         return None
 
 
+def get_active_window(now: datetime):
+    """現在時刻が属する時間帯を返す。無ければ (None, None, None)。"""
+    for w in WINDOWS:
+        start_dt = now.replace(hour=w["start"][0], minute=w["start"][1], second=0, microsecond=0)
+        end_dt = now.replace(hour=w["end"][0], minute=w["end"][1], second=0, microsecond=0)
+        if start_dt <= now < end_dt:
+            return w, start_dt, end_dt
+    return None, None, None
+
+
 def main():
     now = datetime.now()
 
@@ -169,25 +208,21 @@ def main():
     if now.weekday() >= 5:
         return
 
-    config = load_config()
-
-    start_hour = config.get("start_hour", 7)
-    start_minute = config.get("start_minute", 0)
-    end_hour = config.get("end_hour", 9)
-    end_minute = config.get("end_minute", 0)
-
-    start_dt = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-    end_dt = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
-    final_hold_dt = end_dt - timedelta(minutes=FINAL_HOLD_MINUTES)
-
-    # 時間外
-    if now < start_dt or now >= end_dt:
+    # 現在時刻が属する時間帯を判定（朝 or 夜）。時間外なら即終了。
+    window, start_dt, end_dt = get_active_window(now)
+    if window is None:
         return
 
-    log.info("=== tick開始 %s ===", now.strftime("%H:%M:%S"))
+    final_hold_dt = end_dt - timedelta(minutes=FINAL_HOLD_MINUTES)
+
+    config = load_config()
+
+    window_name = window["name"]
+    parks = window["parks"]
+
+    log.info("=== tick開始 %s [%s] ===", now.strftime("%H:%M:%S"), window_name)
 
     client = DocomoBikeClient(config["session_id"], config["api_key"])
-    parks = config["parks"]
     min_battery = config.get("prefer_battery_level_min", 2)
     prefer_csa = config.get("prefer_csa_type", 1)
 
@@ -202,7 +237,7 @@ def main():
     if user_status == 1:
         # 予約中。status APIは reserve_limit を返さないため state ファイルから取得する。
         cyc_name = user_info.get("cyc_name", "")
-        state = load_state()
+        state = load_state(window_name)
         limit_str = state.get("reserve_limit", "")
         # cyc_name の整合性チェック（state が古い別予約の可能性）
         if state.get("cyc_name") and cyc_name and state.get("cyc_name") != cyc_name:
@@ -219,7 +254,7 @@ def main():
             cancel_result = client.cancel_reservation()
             if cancel_result is False:
                 return
-            clear_state()
+            clear_state(window_name)
             # 新規予約フェーズへ
         else:
             remaining = (limit_dt - now).total_seconds()
@@ -239,12 +274,12 @@ def main():
             cancel_result = client.cancel_reservation()
             if cancel_result is False:
                 return  # 通常のキャンセル失敗。次のtickで再試行
-            clear_state()
+            clear_state(window_name)
             # 成功 or expired どちらの場合も新規予約へ進む
 
     else:
         # 予約なし。残っている state は無効。
-        clear_state()
+        clear_state(window_name)
         log.info("予約なし。新規予約を試みます")
 
         # 終了時刻が近い場合は新規予約しない
@@ -258,7 +293,7 @@ def main():
         log.warning("全ポートでバイクが見つかりません。次のtickで再試行")
         return
 
-    result = client.reserve_bike(cyc_name)
+    result = client.reserve_bike(cyc_name, window_name)
     if result:
         log.info("予約完了: %s (%s)", cyc_name, park_name)
 

@@ -51,16 +51,6 @@ jobs:
           {
               "session_id": "${SESSION_ID}",
               "api_key": "${API_KEY}",
-              "parks": [
-                  {"park_id": "00010147", "park_name": "H1-29.skyz tower&garden"},
-                  {"park_id": "00010406", "park_name": "H1-68.芝浦工業大学附属中学高等学校"},
-                  {"park_id": "00010223", "park_name": "H1-44.テプコ豊洲ビル"}
-              ],
-              "reserve_interval_minutes": 18,
-              "start_hour": 7,
-              "start_minute": 0,
-              "end_hour": 9,
-              "end_minute": 0,
               "prefer_battery_level_min": 2,
               "prefer_csa_type": 1
           }
