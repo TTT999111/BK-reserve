@@ -12,6 +12,8 @@ launchd から毎分起動されることを前提に、1回の実行は数秒�
 - 予約なし → 予約する
 - 予約あり → 残り時間が3分以下ならキャンセル → 即再予約
 - 終了5分前以降は予約を残して終了
+- その時間帯で一度バイクを利用したら、以降はその時間帯では何もしない
+  （朝7:30に利用完了 → 7:30〜9:00は予約不要。次は夜19:00から）
 """
 
 import json
@@ -27,7 +29,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 
-BASE_URL = "https://csapi.docomo-cycle.jp/v12/api/restful"
+API_HOST = "https://csapi.docomo-cycle.jp"
+# APIバージョン/user-agentはdocomo側の更新で変わるためconfigで上書き可能にする
+DEFAULT_API_VERSION = "v13"
+DEFAULT_USER_AGENT = "bike%20share/26062402 CFNetwork/3860.600.12 Darwin/25.5.0"
 
 # 時間帯ごとの動作定義（平日のみ）。parksは優先順（先頭ほど優先）。
 # 朝と夜で予約を取り違えないよう state ファイルも時間帯別に分ける。
@@ -105,19 +110,37 @@ def clear_state(window_name: str):
         log.warning("state削除失敗: %s", e)
 
 
+def done_path(window_name: str, now: datetime) -> str:
+    """利用完了マーカーのパス。日付込みなので翌日は自動でリセットされる。"""
+    return os.path.join(LOG_DIR, f"done_{window_name}_{now:%Y%m%d}.json")
+
+
+def is_window_done(window_name: str, now: datetime) -> bool:
+    return os.path.exists(done_path(window_name, now))
+
+
+def mark_window_done(window_name: str, now: datetime):
+    try:
+        with open(done_path(window_name, now), "w") as f:
+            json.dump({"done_at": now.strftime("%Y-%m-%d %H:%M:%S")}, f)
+    except Exception as e:
+        log.warning("done保存失敗: %s", e)
+
+
 class DocomoBikeClient:
-    def __init__(self, session_id: str, api_key: str):
+    def __init__(self, session_id: str, api_key: str, api_version: str = DEFAULT_API_VERSION, user_agent: str = DEFAULT_USER_AGENT):
+        self.base_url = f"{API_HOST}/{api_version}/api/restful"
         self.session = requests.Session()
         self.session.headers.update({
             "content-type": "application/json;charset=UTF-8",
             "x-api-key": api_key,
             "x-bks-sessionid": session_id,
-            "user-agent": "bike%20share/25080601 CFNetwork/3860.500.112 Darwin/25.4.0",
+            "user-agent": user_agent,
             "accept": "*/*",
         })
 
     def _request(self, method: str, path: str, **kwargs):
-        url = f"{BASE_URL}/{path}"
+        url = f"{self.base_url}/{path}"
         for attempt in range(3):
             try:
                 resp = self.session.request(method, url, timeout=10, **kwargs)
@@ -220,9 +243,18 @@ def main():
     window_name = window["name"]
     parks = window["parks"]
 
+    # この時間帯で既にバイクを利用済みなら、以降は何もしない
+    if is_window_done(window_name, now):
+        return
+
     log.info("=== tick開始 %s [%s] ===", now.strftime("%H:%M:%S"), window_name)
 
-    client = DocomoBikeClient(config["session_id"], config["api_key"])
+    client = DocomoBikeClient(
+        config["session_id"],
+        config["api_key"],
+        config.get("api_version", DEFAULT_API_VERSION),
+        config.get("user_agent", DEFAULT_USER_AGENT),
+    )
     min_battery = config.get("prefer_battery_level_min", 2)
     prefer_csa = config.get("prefer_csa_type", 1)
 
@@ -233,6 +265,27 @@ def main():
 
     user_info = status.get("user_info", {})
     user_status = user_info.get("user_status", -1)
+
+    # --- 利用検知: 一度利用したらこの時間帯は終了 ---
+    used = False
+    if user_status not in (0, 1, -1):
+        # 予約でも未予約でもないアクティブ状態（利用中など）。利用したとみなす。
+        # 想定外値なので user_info を全文記録し、後日ログで実値を確認できるようにする。
+        used = True
+        log.info("利用中ステータス検知: user_info=%s", user_info)
+    elif user_status == 0:
+        st = load_state(window_name)
+        st_limit = parse_reserve_limit(st.get("reserve_limit", ""))
+        if st.get("cyc_name") and st_limit is not None and now < st_limit:
+            # 保持していた予約が期限内なのに消えた = ユーザーが取って利用した
+            used = True
+            log.info("予約消失検知(期限内): 利用したとみなす (cyc=%s)", st.get("cyc_name"))
+
+    if used:
+        mark_window_done(window_name, now)
+        clear_state(window_name)
+        log.info("=== %s 利用完了。本時間帯は以降スキップ ===", window_name)
+        return
 
     if user_status == 1:
         # 予約中。status APIは reserve_limit を返さないため state ファイルから取得する。
