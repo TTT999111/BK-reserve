@@ -20,10 +20,14 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
+
+# 一時的とみなすHTTPステータス（リトライ対象。失敗してもGHAを赤にしない）
+TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
@@ -141,15 +145,31 @@ class DocomoBikeClient:
 
     def _request(self, method: str, path: str, **kwargs):
         url = f"{self.base_url}/{path}"
+        last_status = None
         for attempt in range(3):
             try:
                 resp = self.session.request(method, url, timeout=10, **kwargs)
-                return resp.json()
+                last_status = resp.status_code
+                # docomo側の一時障害(5xx等)は少し待って再試行
+                if resp.status_code in TRANSIENT_STATUS:
+                    log.warning("一時エラー HTTP %d (試行%d/3): %s", resp.status_code, attempt + 1, path)
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                try:
+                    return resp.json()
+                except ValueError:
+                    # 非JSON応答(空ボディの401等)。ステータスを結果に載せて返す。
+                    log.warning("非JSON応答 HTTP %d: %s", resp.status_code, path)
+                    return {"result": resp.status_code, "_transient": resp.status_code in TRANSIENT_STATUS}
             except (requests.ConnectionError, requests.Timeout) as e:
                 log.warning("通信エラー (試行%d/3): %s", attempt + 1, e)
+                time.sleep(1.5 * (attempt + 1))
             except Exception as e:
                 log.error("予期しないエラー: %s", e)
-        return {"result": -1}
+                break
+        # 全リトライ失敗。ネットワーク断や5xxは一時扱い(赤エラーにしない)。
+        transient = last_status is None or last_status in TRANSIENT_STATUS
+        return {"result": last_status or -1, "_transient": transient}
 
     def get_status(self) -> dict:
         """予約状況を取得。result200, user_status (0=予約なし, 1=予約中), cyc_name, reserve_limitなど"""
@@ -260,7 +280,12 @@ def main():
 
     status = client.get_status()
     if status.get("result") != 200:
-        log.error("ステータス取得失敗: %s", status)
+        if status.get("_transient"):
+            # docomo側の一時障害(5xx)や通信断。次のtickで再試行。赤エラーにしない。
+            log.warning("ステータス取得を一時エラーでスキップ(次tickで再試行): %s", status)
+            return
+        # 401/403等は session失効 or API変更のサイン。GHAを赤にして気づけるようにする。
+        log.error("ステータス取得失敗(要対応: session失効/APIキー・バージョン変更の可能性): %s", status)
         sys.exit(1)
 
     user_info = status.get("user_info", {})
