@@ -78,6 +78,32 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+# LARK_MENTION_ALL の値 → @全員 の方針。旧来の真偽値も受け付ける
+MENTION_POLICIES = {
+    "": "deadline",
+    "deadline": "deadline",
+    "both": "both",
+    "true": "both",
+    "1": "both",
+    "yes": "both",
+    "on": "both",
+    "none": "none",
+    "false": "none",
+    "0": "none",
+    "no": "none",
+    "off": "none",
+}
+
+
+def parse_mention_policy(raw: Optional[str]) -> str:
+    """@全員 メンションの方針を返す。既定は締切アラートのみ。"""
+    key = (raw or "").strip().lower()
+    if key in MENTION_POLICIES:
+        return MENTION_POLICIES[key]
+    log.warning("LARK_MENTION_ALL=%r は不正。deadline として扱う", raw)
+    return "deadline"
+
+
 def env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -100,7 +126,8 @@ class Config:
         self.extra_holidays_raw = os.environ.get("EXTRA_HOLIDAYS", "")
         self.system_name = os.environ.get("EXPENSE_SYSTEM_NAME", "経費精算システム").strip()
         self.expense_url = os.environ.get("EXPENSE_URL", "").strip()
-        self.mention_all = env_bool("LARK_MENTION_ALL", False)
+        # deadline(既定): 締切アラートのみ @全員 / both: 両方 / none: しない
+        self.mention_policy = parse_mention_policy(os.environ.get("LARK_MENTION_ALL"))
         self.use_holiday_api = env_bool("USE_HOLIDAY_CSV", True)
 
         if self.reminder_policy not in ("keep", "before", "after"):
@@ -392,7 +419,10 @@ def off_day_reason(d: date, cal: "HolidayCalendar") -> str:
 def build_card(kind: str, today: date, cal: HolidayCalendar, cfg: Config) -> dict:
     deadline_actual, deadline_nominal = deadline_date(today.year, today.month, cal, cfg)
     moved = deadline_actual != deadline_nominal
-    mention = "<at id=all></at> " if cfg.mention_all else ""
+    mention_on = cfg.mention_policy == "both" or (
+        cfg.mention_policy == "deadline" and kind == "deadline"
+    )
+    mention = "<at id=all></at> " if mention_on else ""
     system = cfg.system_name
 
     if kind == "reminder":

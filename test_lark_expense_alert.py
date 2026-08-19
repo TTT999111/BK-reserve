@@ -129,10 +129,30 @@ class MessageTest(unittest.TestCase):
         self.assertIn("1月25日(日)", body)
         self.assertEqual(card["header"]["template"], "red")
 
-    def test_mention_all(self):
-        cal, cfg = make_cal({"LARK_MENTION_ALL": "true"})
-        card = bot.build_card("deadline", date(2026, 8, 25), cal, cfg)
-        self.assertIn("<at id=all></at>", card["elements"][0]["text"]["content"])
+    def _mentions(self, env=None):
+        """(リマインドに@全員が入るか, 締切に@全員が入るか)"""
+        cal, cfg = make_cal(env)
+        return tuple(
+            "<at id=all></at>" in bot.build_card(kind, day, cal, cfg)["elements"][0]["text"]["content"]
+            for kind, day in (("reminder", date(2026, 8, 20)), ("deadline", date(2026, 8, 25)))
+        )
+
+    def test_mention_default_is_deadline_only(self):
+        self.assertEqual(self._mentions(), (False, True))
+
+    def test_mention_both(self):
+        self.assertEqual(self._mentions({"LARK_MENTION_ALL": "both"}), (True, True))
+
+    def test_mention_none(self):
+        self.assertEqual(self._mentions({"LARK_MENTION_ALL": "none"}), (False, False))
+
+    def test_mention_legacy_boolean(self):
+        # 旧来の true/false も受け付ける
+        self.assertEqual(self._mentions({"LARK_MENTION_ALL": "true"}), (True, True))
+        self.assertEqual(self._mentions({"LARK_MENTION_ALL": "false"}), (False, False))
+
+    def test_mention_invalid_falls_back_to_deadline(self):
+        self.assertEqual(self._mentions({"LARK_MENTION_ALL": "yes-please"}), (False, True))
 
     def test_sign(self):
         # Lark の署名仕様: HMAC-SHA256(key="{timestamp}\n{secret}", msg="") を base64

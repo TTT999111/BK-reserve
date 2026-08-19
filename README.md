@@ -68,7 +68,7 @@ Variables（任意・未設定なら既定値）:
 | `REMINDER_DAY` | `20` | リマインドの日 |
 | `DEADLINE_DAY` | `25` | 締切の日 |
 | `REMINDER_HOLIDAY_POLICY` | `keep` | 20日が休業日のときの扱い。`keep`=そのまま / `before`=前営業日 / `after`=翌営業日 |
-| `LARK_MENTION_ALL` | `false` | `true` にすると本文の先頭で `@全員` する |
+| `LARK_MENTION_ALL` | `deadline` | `@全員` メンションの範囲。`deadline`=締切アラートのみ / `both`=20日のリマインドにも付ける / `none`=付けない |
 
 **3. 動作確認**
 
