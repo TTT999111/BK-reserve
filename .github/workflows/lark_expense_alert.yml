@@ -1,13 +1,10 @@
 name: lark expense alert
 
 on:
-  # 毎日 01:00 UTC = 10:00 JST に起動し、配信日かどうかはスクリプト側で判定する。
-  # GitHub Actions の schedule は数分〜数十分遅れることがあるが、
-  # 日単位の通知なので許容する。確実性を上げたい場合は
-  # 外部cron (cron-job.org) から workflow_dispatch API で叩いてもよい
-  # （--once-per-day により二重配信はしない）。
-  schedule:
-    - cron: '0 1 * * *'
+  # 日々の配信は Claude の定期タスク(Routine)が担うため、ここでは schedule を持たない。
+  # このワークフローは Lark カスタムボット webhook 方式に戻したい場合の
+  # 手動フォールバック。使う場合は secrets.LARK_WEBHOOK_URL を登録したうえで
+  # 手動起動するか、`schedule: - cron: '0 1 * * *'`（=10:00 JST）を足す。
   workflow_dispatch:
     inputs:
       date:

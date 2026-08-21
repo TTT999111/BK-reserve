@@ -1,11 +1,11 @@
 # BK-reserve
 
-GitHub Actions で動かしている個人用の自動化スクリプト置き場。
+個人用の自動化スクリプト置き場。
 
-| スクリプト | 内容 | ワークフロー |
+| スクリプト | 内容 | 実行方法 |
 | --- | --- | --- |
-| `docomo_bike_tick.py` | ドコモ・バイクシェアの自動予約（毎分tick） | `.github/workflows/bike_reserve.yml` |
-| `lark_expense_alert.py` | Lark への経費精算アラート（毎日1回） | `.github/workflows/lark_expense_alert.yml` |
+| `docomo_bike_tick.py` | ドコモ・バイクシェアの自動予約（毎分tick） | GitHub Actions（`bike_reserve.yml`） |
+| `lark_expense_alert.py` | Lark への経費精算アラート（毎日1回） | Claude の定期タスク（Routine）。`lark_expense_alert.yml` は手動フォールバック |
 
 ---
 
@@ -41,24 +41,49 @@ $ python3 lark_expense_alert.py --calendar 2026
 1. 内閣府が公開している[「国民の祝日」CSV](https://www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv) を毎回取得し、これを正とする（法改正・特例が自動で反映される）。取得できた内容は `logs/` にキャッシュする。
 2. 取得に失敗した場合は、スクリプト内蔵の計算ロジック（振替休日・国民の休日まで算出）にフォールバックする。2007〜2099年について `jpholiday` と全件一致することを確認済み。
 
+### 配信の仕組み
+
+日々の配信は **Claude の定期タスク（Routine）** が担う。Lark のカスタムボットを作る必要も、GitHub に Secret を登録する必要もない。既存の Lark 連携（lark-cli）をそのまま使う。
+
+```
+毎日 10:00 JST に Routine が起動
+  → lark-restore で lark-cli を復元
+  → このリポジトリを clone/pull して python3 lark_expense_alert.py --dry-run を実行
+  → 標準出力が空 = 配信日ではない → 何もせず終了（ログは stderr）
+  → JSON が出た = 配信日 → card を「Thinking Japan Team」グループに投稿
+  → lark_sync_check.sh でトークンを書き戻す
+```
+
+**日付判定はすべてスクリプト側にある**ので、Routine 側に「20日かどうか」「25日が祝日かどうか」といったロジックを持たせない。毎日そのまま実行してよい。
+
 ### セットアップ
 
-**1. Lark 側でカスタムボットを作る**
+接続フォルダのある Cowork セッションで、以下をそのまま貼る（1回だけ）。
 
-投稿先のグループ → 設定 → ボット → ボットを追加 → **Custom Bot（カスタムボット）** を選び、Webhook URL を控える。セキュリティ設定で「署名検証」を有効にした場合は、表示される Secret も控える。
+```
+経費精算アラートの定期タスクを作って。
 
-**2. GitHub の Secrets / Variables を設定する**
+1. lark-restore を実行して lark-cli を復元する
+2. Lark の「Thinking Japan Team」グループの chat_id を調べる
+3. 動作テスト:
+   git clone https://github.com/TTT999111/BK-reserve && cd BK-reserve
+   pip install requests
+   python3 lark_expense_alert.py --force deadline --dry-run
+   → 出力された card JSON を「Thinking Japan Team」に1通投稿して見え方を確認する
+     （@全員が正しくレンダリングされるかもここで確認する）
+4. 問題なければ毎日 10:00 JST の Routine を作成する。中身:
+   - lark-restore を実行
+   - 上記リポジトリを clone/pull して python3 lark_expense_alert.py --dry-run を実行
+   - 標準出力が空なら配信日ではないので何もせず終了（ログは stderr に出る）
+   - JSON が出たら card を「Thinking Japan Team」に投稿
+   - 最後に lark_sync_check.sh でトークンを書き戻す
+```
 
-リポジトリの Settings → Secrets and variables → Actions で登録する。
+GitHub のリポジトリセッションからは接続フォルダが見えず Lark に触れないため、この作業は Cowork 側で行う必要がある。
 
-Secrets（必須）:
+### 設定項目
 
-| 名前 | 内容 |
-| --- | --- |
-| `LARK_WEBHOOK_URL` | カスタムボットの Webhook URL |
-| `LARK_WEBHOOK_SECRET` | 署名検証を有効にした場合のみ設定 |
-
-Variables（任意・未設定なら既定値）:
+すべて環境変数。未設定なら既定値で動く。Routine 方式ではプロンプト側で `EXPENSE_URL=... python3 lark_expense_alert.py ...` のように渡す。
 
 | 名前 | 既定値 | 内容 |
 | --- | --- | --- |
@@ -69,22 +94,20 @@ Variables（任意・未設定なら既定値）:
 | `DEADLINE_DAY` | `25` | 締切の日 |
 | `REMINDER_HOLIDAY_POLICY` | `keep` | 20日が休業日のときの扱い。`keep`=そのまま / `before`=前営業日 / `after`=翌営業日 |
 | `LARK_MENTION_ALL` | `deadline` | `@全員` メンションの範囲。`deadline`=締切アラートのみ / `both`=20日のリマインドにも付ける / `none`=付けない |
+| `USE_HOLIDAY_CSV` | `true` | `false` にすると内閣府CSVを取りに行かず組み込み計算だけで判定する |
 
-**3. 動作確認**
+### GitHub Actions（手動フォールバック）
 
-Actions → `lark expense alert` → Run workflow で手動起動できる。入力欄で
+`.github/workflows/lark_expense_alert.yml` は、Lark カスタムボットの webhook 方式に戻したくなった場合のフォールバックとして残してある。**`schedule` は持たせていない**ので、放置しても勝手に動かない。
 
-- `判定日の上書き` に `2026-01-23` などを入れると、その日として判定する
-- `強制配信する種別` に `reminder` / `deadline` を選ぶと、配信日でなくても送る
-- `送信せず内容だけ確認する` を on にすると、Lark には送らずログに JSON を出す
+使う場合:
 
-まず dry run で文面を確認し、そのあと `強制配信する種別=deadline` で実際に届くか確かめるとよい。
+1. 投稿先グループ → 設定 → ボット → ボットを追加 → **Custom Bot** を作り、Webhook URL を控える
+2. Settings → Secrets and variables → Actions に `LARK_WEBHOOK_URL` を登録（Lark 側で署名検証を有効にしたなら `LARK_WEBHOOK_SECRET` も）
+3. Actions → `lark expense alert` → Run workflow で手動起動。`判定日の上書き` / `強制配信する種別` / `送信せず内容だけ確認する` を指定できる
+4. 日次で回したければ `on:` に `schedule: - cron: '0 1 * * *'`（=10:00 JST）を足す
 
-### 起動タイミング
-
-`.github/workflows/lark_expense_alert.yml` の `schedule` で毎日 **10:00 JST**（`0 1 * * *` UTC）に起動し、その日が配信日かどうかはスクリプト側で判定する。配信日でなければ何もせず終了する。
-
-GitHub Actions の `schedule` は数分〜数十分遅れることがある。時刻の確実性が要る場合は、`docomo_bike_tick.py` と同様に外部cron（cron-job.org など）から `workflow_dispatch` API を叩いてもよい。ワークフローは `--once-per-day` 付きで実行するので、schedule と外部cronが二重に起動しても同じ日に2回配信されることはない（配信済みマーカーを Actions キャッシュで引き継ぐ）。
+「設定項目」の各値は、この方式では GitHub の Variables として登録するとワークフローが読み込む。
 
 ### ローカルでの実行
 
