@@ -1,0 +1,90 @@
+name: lark expense alert
+
+on:
+  # 日々の配信は Claude の定期タスク(Routine)が担うため、ここでは schedule を持たない。
+  # このワークフローは Lark カスタムボット webhook 方式に戻したい場合の
+  # 手動フォールバック。使う場合は secrets.LARK_WEBHOOK_URL を登録したうえで
+  # 手動起動するか、`schedule: - cron: '0 1 * * *'`（=10:00 JST）を足す。
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '判定日の上書き (YYYY-MM-DD)'
+        required: false
+      force:
+        description: '強制配信する種別'
+        required: false
+        type: choice
+        options: ['', 'reminder', 'deadline']
+        default: ''
+      dry_run:
+        description: '送信せず内容だけ確認する'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: lark-expense-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Compute cache key
+        id: cachekey
+        env:
+          TZ: Asia/Tokyo
+        run: echo "month=$(date +%Y%m)" >> $GITHUB_OUTPUT
+
+      - name: Restore state cache
+        uses: actions/cache/restore@v4
+        with:
+          # 祝日CSVのキャッシュと、二重配信防止マーカーを引き継ぐ
+          path: logs
+          key: lark-expense-${{ steps.cachekey.outputs.month }}-${{ github.run_id }}
+          restore-keys: |
+            lark-expense-${{ steps.cachekey.outputs.month }}-
+            lark-expense-
+
+      - name: Run alert
+        env:
+          TZ: Asia/Tokyo
+          LARK_WEBHOOK_URL: ${{ secrets.LARK_WEBHOOK_URL }}
+          LARK_WEBHOOK_SECRET: ${{ secrets.LARK_WEBHOOK_SECRET }}
+          # 以下は任意。未設定なら既定値で動く
+          EXPENSE_SYSTEM_NAME: ${{ vars.EXPENSE_SYSTEM_NAME }}
+          EXPENSE_URL: ${{ vars.EXPENSE_URL }}
+          EXTRA_HOLIDAYS: ${{ vars.EXTRA_HOLIDAYS }}
+          REMINDER_DAY: ${{ vars.REMINDER_DAY }}
+          DEADLINE_DAY: ${{ vars.DEADLINE_DAY }}
+          REMINDER_HOLIDAY_POLICY: ${{ vars.REMINDER_HOLIDAY_POLICY }}
+          LARK_MENTION_ALL: ${{ vars.LARK_MENTION_ALL }}
+          # 手動起動の入力は環境変数経由で受ける（シェルへの直接展開を避ける）
+          IN_DATE: ${{ inputs.date }}
+          IN_FORCE: ${{ inputs.force }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--once-per-day)
+          if [ -n "${IN_DATE:-}" ]; then args+=(--date "$IN_DATE"); fi
+          if [ -n "${IN_FORCE:-}" ]; then args+=(--force "$IN_FORCE"); fi
+          if [ "${IN_DRY_RUN:-false}" = "true" ]; then args+=(--dry-run); fi
+          python3 lark_expense_alert.py "${args[@]}"
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs
+          key: lark-expense-${{ steps.cachekey.outputs.month }}-${{ github.run_id }}
