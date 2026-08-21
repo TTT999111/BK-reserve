@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | `docomo_bike_tick.py` | ドコモ・バイクシェアの自動予約（毎分tick） | GitHub Actions（`bike_reserve.yml`） |
 | `lark_expense_alert.py` | Lark への経費精算アラート（毎日1回） | Claude の定期タスク（Routine）。`lark_expense_alert.yml` は手動フォールバック |
+| `run_alert.sh` | 上記を Routine から1コマンドで叩くためのラッパ | Routine から呼ばれる |
 
 ---
 
@@ -48,35 +49,37 @@ $ python3 lark_expense_alert.py --calendar 2026
 ```
 毎日 10:00 JST に Routine が起動
   → lark-restore で lark-cli を復元
-  → このリポジトリを clone/pull して python3 lark_expense_alert.py --dry-run を実行
+  → bash run_alert.sh --markdown を実行
+        （中で git pull → requests の導入 → 配信日の判定 まで済ませる）
   → 標準出力が空 = 配信日ではない → 何もせず終了（ログは stderr）
-  → JSON が出た = 配信日 → card を「Thinking Japan Team」グループに投稿
+  → 本文が出た = 配信日 → それを「Thinking Japan Team」グループに投稿
   → lark_sync_check.sh でトークンを書き戻す
 ```
 
-**日付判定はすべてスクリプト側にある**ので、Routine 側に「20日かどうか」「25日が祝日かどうか」といったロジックを持たせない。毎日そのまま実行してよい。
+**日付判定はすべてスクリプト側にある**ので、Routine 側に「20日かどうか」「25日が祝日かどうか」といったロジックを持たせない。毎日そのまま実行してよい。Routine に残るのは「実行する／出力があれば投稿する」の2つだけ。
+
+出力形式は2つある。`--markdown` はテキストメッセージ用の本文を出し、`lark-cli im +messages-send --markdown` にそのまま渡せる。無指定ならカード（interactive）の JSON を出す。@全員 のメンション記法は形式ごとに異なるので、スクリプト側で出し分けている。
 
 ### セットアップ
 
 接続フォルダのある Cowork セッションで、以下をそのまま貼る（1回だけ）。
 
 ```
-経費精算アラートの定期タスクを作って。
+経費精算アラートの定期タスクを作って。投稿先は Lark の「Thinking Japan Team」グループ。
 
+セットアップ:
 1. lark-restore を実行して lark-cli を復元する
-2. Lark の「Thinking Japan Team」グループの chat_id を調べる
-3. 動作テスト:
-   git clone https://github.com/TTT999111/BK-reserve && cd BK-reserve
-   pip install requests
-   python3 lark_expense_alert.py --force deadline --dry-run
-   → 出力された card JSON を「Thinking Japan Team」に1通投稿して見え方を確認する
-     （@全員が正しくレンダリングされるかもここで確認する）
-4. 問題なければ毎日 10:00 JST の Routine を作成する。中身:
+2. 「Thinking Japan Team」の chat_id を調べる
+3. git clone https://github.com/TTT999111/BK-reserve ~/bk-reserve
+4. bash ~/bk-reserve/run_alert.sh --markdown --force deadline
+   → 出力された本文を「Thinking Japan Team」に1通投稿してテストする
+     （@全員 がメンションとして描画されるかもここで確認する）
+
+そのうえで毎日 10:00 JST の Routine を作る。中身は:
    - lark-restore を実行
-   - 上記リポジトリを clone/pull して python3 lark_expense_alert.py --dry-run を実行
-   - 標準出力が空なら配信日ではないので何もせず終了（ログは stderr に出る）
-   - JSON が出たら card を「Thinking Japan Team」に投稿
-   - 最後に lark_sync_check.sh でトークンを書き戻す
+   - bash ~/bk-reserve/run_alert.sh --markdown
+   - 出力が空なら何もせず終了。出力があればそれを「Thinking Japan Team」に投稿
+   - lark_sync_check.sh でトークンを書き戻す
 ```
 
 GitHub のリポジトリセッションからは接続フォルダが見えず Lark に触れないため、この作業は Cowork 側で行う必要がある。
@@ -127,4 +130,8 @@ python3 lark_expense_alert.py --force deadline
 
 # テスト
 python3 test_lark_expense_alert.py
+
+# Routine と同じ経路で確認する（--no-pull で git pull を抑止）
+bash run_alert.sh --no-pull --markdown --date 2026-01-23
+bash run_alert.sh --no-pull --markdown --date 2026-08-21   # 配信日でないので何も出ない
 ```

@@ -416,13 +416,28 @@ def off_day_reason(d: date, cal: "HolidayCalendar") -> str:
 # ---------------------------------------------------------------- メッセージ
 
 
-def build_card(kind: str, today: date, cal: HolidayCalendar, cfg: Config) -> dict:
-    deadline_actual, deadline_nominal = deadline_date(today.year, today.month, cal, cfg)
-    moved = deadline_actual != deadline_nominal
-    mention_on = cfg.mention_policy == "both" or (
+# @全員 メンションの記法は、カード内(lark_md)とテキストメッセージで異なる
+MENTION_TAG = {
+    "card": "<at id=all></at> ",
+    "markdown": '<at user_id="all">全員</at> ',
+}
+
+
+def mention_prefix(kind: str, cfg: Config, mode: str) -> str:
+    """その種別で @全員 を付けるなら、モードに応じたタグを返す"""
+    on = cfg.mention_policy == "both" or (
         cfg.mention_policy == "deadline" and kind == "deadline"
     )
-    mention = "<at id=all></at> " if mention_on else ""
+    return MENTION_TAG[mode] if on else ""
+
+
+def build_message(
+    kind: str, today: date, cal: HolidayCalendar, cfg: Config, mode: str = "card"
+) -> Tuple[str, str, List[str], str]:
+    """(タイトル, カードの色, 本文行, 注記) を組み立てる。card / markdown で共用する。"""
+    deadline_actual, deadline_nominal = deadline_date(today.year, today.month, cal, cfg)
+    moved = deadline_actual != deadline_nominal
+    mention = mention_prefix(kind, cfg, mode)
     system = cfg.system_name
 
     if kind == "reminder":
@@ -460,6 +475,12 @@ def build_card(kind: str, today: date, cal: HolidayCalendar, cfg: Config) -> dic
             )
         note = "毎月25日（休業日の場合は前営業日）に自動配信しています"
 
+    return title, template, lines, note
+
+
+def build_card(kind: str, today: date, cal: HolidayCalendar, cfg: Config) -> dict:
+    title, template, lines, note = build_message(kind, today, cal, cfg, mode="card")
+
     elements: List[dict] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
     ]
@@ -470,7 +491,10 @@ def build_card(kind: str, today: date, cal: HolidayCalendar, cfg: Config) -> dic
                 "actions": [
                     {
                         "tag": "button",
-                        "text": {"tag": "plain_text", "content": f"{system}を開く"},
+                        "text": {
+                            "tag": "plain_text",
+                            "content": f"{cfg.system_name}を開く",
+                        },
                         "url": cfg.expense_url,
                         "type": "primary",
                     }
@@ -488,6 +512,17 @@ def build_card(kind: str, today: date, cal: HolidayCalendar, cfg: Config) -> dic
         },
         "elements": elements,
     }
+
+
+def render_markdown(kind: str, today: date, cal: HolidayCalendar, cfg: Config) -> str:
+    """lark-cli の --markdown にそのまま渡せるテキストを組み立てる"""
+    title, _, lines, note = build_message(kind, today, cal, cfg, mode="markdown")
+
+    out = [f"**{title}**", ""] + lines
+    if cfg.expense_url:
+        out += ["", f"[{cfg.system_name}を開く]({cfg.expense_url})"]
+    out += ["", note]
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------- 送信
@@ -611,6 +646,12 @@ def main() -> int:
     parser.add_argument("--date", help="判定日をYYYY-MM-DDで上書きする（テスト用）")
     parser.add_argument("--force", choices=["reminder", "deadline"], help="配信日でなくても指定種別を送る")
     parser.add_argument("--dry-run", action="store_true", help="送信せず内容だけ表示する")
+    parser.add_argument(
+        "--emit",
+        choices=["card", "markdown"],
+        default="card",
+        help="--dry-run 時の出力形式。card=カードJSON / markdown=本文テキスト",
+    )
     parser.add_argument("--calendar", type=int, metavar="YEAR", help="指定年の配信予定を表示して終了")
     parser.add_argument("--once-per-day", action="store_true", help="同じ日に二重配信しない")
     args = parser.parse_args()
@@ -653,8 +694,17 @@ def main() -> int:
     log.info("配信対象: %s (%s)", kind, today)
 
     if dry_run:
-        print(json.dumps({"msg_type": "interactive", "card": card}, ensure_ascii=False, indent=2))
-        log.info("DRY_RUN のため送信しない")
+        if args.emit == "markdown":
+            print(render_markdown(kind, today, cal, cfg))
+        else:
+            print(
+                json.dumps(
+                    {"msg_type": "interactive", "card": card},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        log.info("DRY_RUN のため送信しない (--emit %s)", args.emit)
         return 0
 
     if not cfg.webhook_url:

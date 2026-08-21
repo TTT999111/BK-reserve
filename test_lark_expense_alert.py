@@ -154,6 +154,46 @@ class MessageTest(unittest.TestCase):
     def test_mention_invalid_falls_back_to_deadline(self):
         self.assertEqual(self._mentions({"LARK_MENTION_ALL": "yes-please"}), (False, True))
 
+    def test_markdown_matches_card_content(self):
+        cal, cfg = make_cal()
+        md = bot.render_markdown("deadline", date(2026, 1, 23), cal, cfg)
+        card_body = bot.build_card("deadline", date(2026, 1, 23), cal, cfg)["elements"][0][
+            "text"
+        ]["content"]
+        self.assertIn("⏰ 本日締切：1月分 経費精算", md)  # タイトルが本文に含まれる
+        self.assertIn("本日 1月23日(金)", md)
+        self.assertIn("1月25日(日)", md)  # 前倒しの理由
+        self.assertIn("毎月25日", md)  # 注記
+        # 本文の箇条書きはカードと同一
+        for line in card_body.splitlines():
+            if line.startswith("- "):
+                self.assertIn(line, md)
+
+    def test_markdown_mention_syntax(self):
+        # markdown はテキストメッセージ用の記法を使い、カード用の記法は混ぜない
+        cal, cfg = make_cal()
+        deadline = bot.render_markdown("deadline", date(2026, 8, 25), cal, cfg)
+        reminder = bot.render_markdown("reminder", date(2026, 8, 20), cal, cfg)
+        self.assertIn('<at user_id="all">全員</at>', deadline)
+        self.assertNotIn("<at id=all>", deadline)
+        self.assertNotIn("<at", reminder)  # 既定ではリマインドに@全員は付かない
+
+    def test_markdown_mention_policy(self):
+        for policy, expected in (("both", (True, True)), ("none", (False, False))):
+            cal, cfg = make_cal({"LARK_MENTION_ALL": policy})
+            got = (
+                '<at user_id="all">全員</at>'
+                in bot.render_markdown("reminder", date(2026, 8, 20), cal, cfg),
+                '<at user_id="all">全員</at>'
+                in bot.render_markdown("deadline", date(2026, 8, 25), cal, cfg),
+            )
+            self.assertEqual(got, expected, policy)
+
+    def test_markdown_expense_url_link(self):
+        cal, cfg = make_cal({"EXPENSE_URL": "https://example.com/e"})
+        md = bot.render_markdown("deadline", date(2026, 8, 25), cal, cfg)
+        self.assertIn("[経費精算システムを開く](https://example.com/e)", md)
+
     def test_sign(self):
         # Lark の署名仕様: HMAC-SHA256(key="{timestamp}\n{secret}", msg="") を base64
         import base64
